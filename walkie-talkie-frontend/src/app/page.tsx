@@ -20,6 +20,12 @@ const Home: React.FC = () => {
   const [peers, setPeers] = useState<{ [key: string]: PeerConnection }>({});
   const userStream = useRef<MediaStream | null>(null);
   const peersRef = useRef<{ [key: string]: PeerInstance }>({});
+  const activeCallId = useRef<string | null>(null);
+
+  // New Refs for Recording
+  const mediaRecorder = useRef<MediaRecorder | null>(null);
+  const recordedChunks = useRef<Blob[]>([]);
+  const currentCallId = useRef<string | null>(null); // To associate audio with a call
 
   useEffect(() => {
     if (!socket) return;
@@ -43,6 +49,7 @@ const Home: React.FC = () => {
     });
 
     socket.on('user-joined', ({ socketId }) => {
+      if (socketId === socket.id) return; 
       console.log(`User joined: ${socketId}`);
       if (!peersRef.current[socketId]) {
         const peer = createPeer(true, socketId);
@@ -75,6 +82,23 @@ const Home: React.FC = () => {
       setSpeakingUsers((prev) => ({ ...prev, [socketId]: isSpeaking }));
     });
 
+    socket.on('call-started', ({ callId }) => {
+      if (!callId) {
+        console.error('No call ID received from server.');
+        return;
+      }
+      console.log(`Call started with ID: ${callId}`);
+      currentCallId.current = callId;
+      activeCallId.current = callId;
+      startRecording();
+    });
+
+    socket.on('call-ended', ({ callId }) => {
+      console.log(`Call ended with ID: ${callId}`);
+      stopRecording();
+      currentCallId.current = null;
+    });
+
     return () => {
       console.log('Detaching socket event listeners.');
       socket.off('connect');
@@ -82,6 +106,8 @@ const Home: React.FC = () => {
       socket.off('user-joined');
       socket.off('user-left');
       socket.off('speaking-status');
+      socket.off('call-started');
+      socket.off('call-ended');
     };
   }, [socket]);
 
@@ -172,6 +198,11 @@ const Home: React.FC = () => {
 
     // Remove all audio elements except user's own
     document.querySelectorAll('audio[id^="audio-"]').forEach((audio) => audio.remove());
+
+    // End the call if active
+    if (currentCallId.current) {
+      socket?.emit('end-call', { callId: currentCallId.current, room });
+    }
   };
 
   const toggleMic = () => {
@@ -191,13 +222,142 @@ const Home: React.FC = () => {
     // Log the speaking status in the local browser
     if (newMicState) {
       console.log('You are now speaking');
+      // Start the call if not already started
+      if (!currentCallId.current) {
+        startCall();
+      }
     } else {
       console.log('You are now listening');
+      // End the call if active
+      if (currentCallId.current) {
+        socket?.emit('end-call', { callId: currentCallId.current, room });
+      }
     }
   };
 
   const emitSpeakingStatus = (status: boolean) => {
     socket?.emit(status ? 'start-speaking' : 'stop-speaking', { room });
+  };
+
+  // New Functions for Recording
+  const startRecording = () => {
+    if (userStream.current) {
+      mediaRecorder.current = new MediaRecorder(userStream.current);
+      recordedChunks.current = [];
+
+      mediaRecorder.current.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          recordedChunks.current.push(event.data);
+        }
+      };
+
+      mediaRecorder.current.onstop = async () => {
+        const blob = new Blob(recordedChunks.current, { type: 'audio/webm' });
+        console.log('Recording stopped, preparing to upload audio.');
+        console.log('blob>>>>', blob);
+      
+        // Capture the callId before it's reset
+        const callId = activeCallId.current;
+      
+        if (!callId) {
+          console.error('No call ID associated with the audio file.');
+          return;
+        }
+      
+        // Convert blob to File
+        const file = new File([blob], `call-${callId}.webm`, { type: 'audio/webm' });
+        console.log('file>>>>', file);
+      
+        // Upload the audio file to the server
+        console.log('going to call upload audio api', callId, file);
+        await uploadAudio(file, callId);
+      
+        // Reset activeCallId
+        activeCallId.current = null;
+      };
+      
+
+      mediaRecorder.current.start();
+      console.log('Audio recording started.');
+    }
+  };
+
+  const stopRecording = () => {
+    if (mediaRecorder.current && mediaRecorder.current.state !== 'inactive') {
+      mediaRecorder.current.stop();
+      console.log('Audio recording stopped.');
+  
+      if (!activeCallId.current) {
+        console.error('No valid call ID found. Skipping upload.');
+      }
+    }
+  };
+  
+  const uploadAudio = async (file: File, callId: string | null) => {
+    console.log('uploadAudio', file, callId);
+    if (!callId) {
+      console.error('No call ID associated with the audio file.');
+      return;
+    }
+
+    const formData = new FormData();
+    formData.append('callId', callId);
+    formData.append('audio', file);
+console.log('FormData:', formData);
+    try {
+      console.log('Uploading audio file...');
+      const response = await fetch('http://localhost:3005/audio/upload', {
+        method: 'POST',
+        body: formData,
+      });
+console.log('Response of Uploading audio file', response);
+      if (response.ok) {
+        console.log('Audio file uploaded successfully.');
+      } else {
+        const error = await response.json();
+        console.error('Failed to upload audio file:', error.message);
+      }
+    } catch (error) {
+      console.error('Error uploading audio file:', error);
+    }
+  };
+
+  const downloadAudio = async (callId: string) => {
+    try {
+      const response = await fetch(`http://localhost:4000/audio/${callId}/download`);
+      if (!response.ok) {
+        throw new Error('Failed to download audio');
+      }
+
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `call-${callId}.webm`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+      console.log('Audio file downloaded successfully.');
+    } catch (error) {
+      console.error('Error downloading audio file:', error);
+    }
+  };
+
+  const startCall = () => {
+    const receiverSocketId = getReceiverSocketId();
+    if (receiverSocketId) {
+      socket?.emit('start-call', { room, receiverSocketId });
+      console.log('Call initiated.');
+    } else {
+      console.error('No receiver socket ID found to initiate the call.');
+    }
+  };
+
+  const getReceiverSocketId = (): string | null => {
+    const callerSocketId = socket?.id;
+    const peerSocketIds = Object.keys(peers).filter(id => id !== callerSocketId);
+    return peerSocketIds.length > 0 ? peerSocketIds[0] : null;
   };
 
   return (
@@ -247,6 +407,15 @@ const Home: React.FC = () => {
               </li>
             </ul>
           </div>
+          {/* Button to download audio after call ends */}
+          {currentCallId.current && !micActive && (
+            <button
+              onClick={() => downloadAudio(currentCallId.current as string)}
+              style={{ padding: '8px 16px', marginTop: '20px' }}
+            >
+              Download Conversation
+            </button>
+          )}
         </div>
       )}
     </div>
@@ -254,334 +423,3 @@ const Home: React.FC = () => {
 };
 
 export default Home;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-// // src/app/page.tsx
-// 'use client';
-
-// import React, { useState, useRef, useEffect } from 'react';
-// import { useSocket } from '@/context/SocketContext';
-// import Peer, { Instance as PeerInstance } from 'simple-peer';
-
-// interface PeerConnection {
-//   peer: PeerInstance;
-//   stream: MediaStream;
-// }
-
-// const Home: React.FC = () => {
-//   const { socket } = useSocket();
-//   const [room, setRoom] = useState<string>('');
-//   const [joined, setJoined] = useState<boolean>(false);
-//   const [micActive, setMicActive] = useState<boolean>(false);
-//   const [isSpeaking, setIsSpeaking] = useState<boolean>(false); // Flag to track speaking state
-//   const [peers, setPeers] = useState<{ [key: string]: PeerConnection }>({});
-//   const userStream = useRef<MediaStream | null>(null);
-//   const peersRef = useRef<{ [key: string]: PeerInstance }>({});
-
-//   useEffect(() => {
-//     if (!socket) return;
-
-//     console.log('Attaching socket event listeners.');
-
-//     socket.on('signal', ({ from, signal }) => {
-//       console.log(`Received 'signal' from ${from}`);
-
-//       // If no peer exists for the sender, create one
-//       if (!peersRef.current[from]) {
-//         console.log(`Creating peer for ${from} (not an initiator).`);
-
-//         const peer = new Peer({
-//           initiator: false, // Not the initiator for this peer
-//           trickle: false,
-//           stream: userStream.current || undefined,
-//           config: {
-//             iceServers: [
-//               { urls: process.env.NEXT_PUBLIC_STUN_SERVER || 'stun:stun.l.google.com:19302' },
-//               {
-//                 urls: process.env.NEXT_PUBLIC_TURN_SERVER || 'turn:your-turn-server.com',
-//                 username: process.env.NEXT_PUBLIC_TURN_USERNAME || 'user',
-//                 credential: process.env.NEXT_PUBLIC_TURN_PASSWORD || 'pass',
-//               },
-//             ],
-//           },
-//         });
-
-//         peer.on('signal', (newSignal) => {
-//           console.log(`Sending 'signal' to ${from}`);
-//           socket.emit('signal', { to: from, signal: newSignal });
-//         });
-
-//         peer.on('stream', (stream) => {
-//           console.log(`Received stream from ${from}`);
-//           addAudioStream(from, stream);
-//         });
-
-//         peer.on('close', () => {
-//           console.log(`Peer connection with ${from} closed.`);
-//           delete peersRef.current[from];
-//           setPeers((prevPeers) => {
-//             const updatedPeers = { ...prevPeers };
-//             delete updatedPeers[from];
-//             return updatedPeers;
-//           });
-//         });
-
-//         peer.on('error', (err) => {
-//           console.error(`Peer error with ${from}:`, err);
-//         });
-
-//         peersRef.current[from] = peer;
-//         setPeers((prevPeers) => ({
-//           ...prevPeers,
-//           [from]: { peer, stream: userStream.current as MediaStream },
-//         }));
-
-//         console.log(`Peer connection with ${from} established.`);
-//       }
-
-//       // Pass the signal to the peer
-//       peersRef.current[from].signal(signal);
-//     });
-
-//     socket.on('user-joined', ({ socketId }) => {
-//       console.log(`User joined: ${socketId}`);
-//       initiatePeer(socketId, true);
-//     });
-
-//     socket.on('user-left', ({ socketId }) => {
-//       console.log(`User left: ${socketId}`);
-//       if (peersRef.current[socketId]) {
-//         peersRef.current[socketId].destroy();
-//         delete peersRef.current[socketId];
-//         setPeers((prevPeers) => {
-//           const updatedPeers = { ...prevPeers };
-//           delete updatedPeers[socketId];
-//           return updatedPeers;
-//         });
-//         console.log(`Peer connection with ${socketId} destroyed.`);
-//       } else {
-//         console.warn(`No peer found with socket ID: ${socketId}`);
-//       }
-//     });
-
-//     return () => {
-//       console.log('Detaching socket event listeners.');
-//       socket.off('signal');
-//       socket.off('user-joined');
-//       socket.off('user-left');
-//     };
-//   }, [socket]);
-
-//   const initiatePeer = (socketId: string, initiator: boolean) => {
-//     if (!userStream.current) {
-//       console.error('User media stream is not available.');
-//       return;
-//     }
-
-//     console.log(`Initiating peer connection with ${socketId}, initiator: ${initiator}`);
-
-//     const peer = new Peer({
-//       initiator,
-//       trickle: false,
-//       stream: userStream.current,
-//       config: {
-//         iceServers: [
-//           { urls: process.env.NEXT_PUBLIC_STUN_SERVER || 'stun:stun.l.google.com:19302' },
-//           {
-//             urls: process.env.NEXT_PUBLIC_TURN_SERVER || 'turn:your-turn-server.com',
-//             username: process.env.NEXT_PUBLIC_TURN_USERNAME || 'user',
-//             credential: process.env.NEXT_PUBLIC_TURN_PASSWORD || 'pass',
-//           },
-//         ],
-//       },
-//     });
-
-//     peer.on('signal', (signal) => {
-//       console.log(`Sending 'signal' to ${socketId}`);
-//       socket?.emit('signal', { to: socketId, signal });
-//     });
-
-//     peer.on('stream', (stream) => {
-//       console.log(`Received stream from ${socketId}`);
-//       addAudioStream(socketId, stream);
-//     });
-
-//     peer.on('close', () => {
-//       console.log(`Peer connection with ${socketId} closed.`);
-//       delete peersRef.current[socketId];
-//       setPeers((prevPeers) => {
-//         const updatedPeers = { ...prevPeers };
-//         delete updatedPeers[socketId];
-//         return updatedPeers;
-//       });
-//     });
-
-//     peer.on('error', (err) => {
-//       console.error(`Peer error with ${socketId}:`, err);
-//     });
-
-//     peersRef.current[socketId] = peer;
-//     setPeers((prevPeers) => ({
-//       ...prevPeers,
-//       [socketId]: { peer, stream: userStream.current as MediaStream },
-//     }));
-
-//     console.log(`Peer connection with ${socketId} established.`);
-//   };
-
-//   const addAudioStream = (socketId: string, stream: MediaStream) => {
-//     console.log(`Adding audio stream for ${socketId}`);
-//     const audio = document.createElement('audio');
-//     audio.srcObject = stream;
-//     audio.autoplay = true;
-//     audio.controls = false;
-//     audio.id = `audio-${socketId}`;
-//     document.body.appendChild(audio);
-
-//     audio.onplay = () => console.log(`Audio for ${socketId} is playing.`);
-//     audio.onerror = (err) => console.error(`Error with audio for ${socketId}:`, err);
-
-//     console.log(`Audio element added for ${socketId}`);
-//   };
-
-//   const joinRoom = async () => {
-//     if (!room) {
-//       console.warn('Room ID is empty.');
-//       return;
-//     }
-
-//     console.log(`Attempting to join room: ${room}`);
-
-//     try {
-//       const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-//       userStream.current = stream;
-//       console.log('User media stream acquired.');
-
-//       socket?.emit('join-room', { room });
-//       console.log(`'join-room' event emitted for room: ${room}`);
-//       setJoined(true);
-//     } catch (err) {
-//       console.error('Failed to get user media:', err);
-//       alert('Could not access your microphone. Please check permissions.');
-//     }
-//   };
-
-//   const leaveRoom = () => {
-//     if (!room) {
-//       console.warn('Room ID is empty.');
-//       return;
-//     }
-
-//     console.log(`Leaving room: ${room}`);
-//     socket?.emit('leave-room', { room });
-//     console.log(`'leave-room' event emitted for room: ${room}`);
-//     setJoined(false);
-
-//     if (userStream.current) {
-//       console.log('Stopping user media streams.');
-//       userStream.current.getTracks().forEach((track) => track.stop());
-//       userStream.current = null;
-//     }
-
-//     Object.keys(peersRef.current).forEach((socketId) => {
-//       console.log(`Destroying peer connection with ${socketId}`);
-//       peersRef.current[socketId].destroy();
-//     });
-//     peersRef.current = {};
-//     setPeers({});
-
-//     const audios = document.querySelectorAll('audio[id^="audio-"]');
-//     audios.forEach((audio) => {
-//       console.log(`Removing audio element: ${audio.id}`);
-//       audio.remove();
-//     });
-//     console.log('All audio elements removed.');
-//   };
-
-//   const toggleMic = () => {
-//     if (!userStream.current) {
-//       console.error('User media stream is not available.');
-//       return;
-//     }
-
-//     userStream.current.getAudioTracks().forEach((track) => {
-//       track.enabled = !micActive;
-//     });
-//     setMicActive(!micActive);
-//     setIsSpeaking(!micActive); // Update the speaking flag
-//     console.log(`Microphone is now ${micActive ? 'off' : 'on'}.`);
-
-//     if (!micActive) {
-//       console.log('You are now speaking.');
-//     } else {
-//       console.log('You are now listening.');
-//     }
-//   };
-//   return (
-//     <div className="flex flex-col items-center justify-center min-h-screen bg-gray-100 p-4">
-//       {!joined ? (
-//         <div className="bg-white p-8 rounded shadow-md w-full max-w-md">
-//           <h1 className="text-2xl font-bold mb-4 text-center">Join a Walkie-Talkie Room</h1>
-//           <input
-//             type="text"
-//             placeholder="Enter Room ID"
-//             value={room}
-//             onChange={(e) => {
-//               setRoom(e.target.value);
-//               console.log(`Room ID updated to: ${e.target.value}`);
-//             }}
-//             className="w-full p-3 border border-gray-300 rounded mb-4 focus:outline-none focus:ring-2 focus:ring-blue-500"
-//           />
-//           <button
-//             onClick={joinRoom}
-//             className="w-full bg-blue-500 text-white py-2 rounded hover:bg-blue-600 transition duration-200"
-//           >
-//             Join
-//           </button>
-//         </div>
-//       ) : (
-//         <div className="bg-white p-8 rounded shadow-md w-full max-w-md text-center">
-//           <h1 className="text-2xl font-bold mb-4">Connected to Room: {room}</h1>
-//           <p className="mb-6">Speak into your microphone to communicate in real-time.</p>
-//           <button
-//             onClick={leaveRoom}
-//             className="w-full bg-red-500 text-white py-2 rounded hover:bg-red-600 transition duration-200"
-//           >
-//             Leave Room
-//           </button>
-//           <button
-//             onMouseDown={toggleMic}
-//             onMouseUp={toggleMic}
-//             className={`w-full ${
-//   micActive ? 'bg-green-500' : 'bg-gray-500'
-// } text-white py-2 rounded hover:bg-green-600 transition duration-200 mt-4`}
-//           >
-//             {micActive ? 'Mic On' : 'Mic Off'}
-//           </button>
-//         </div>
-//       )}
-//     </div>
-//   );
-// };
-
-// export default Home;

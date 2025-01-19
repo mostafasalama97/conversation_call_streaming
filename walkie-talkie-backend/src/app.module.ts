@@ -8,6 +8,8 @@ import { SignalingGateway } from './signaling/signaling.gateway';
 import { Room } from './rooms/room.entity';
 import { User } from './users/user.entity';
 import { Call } from './calls/call.entity';
+import { AudioController } from './audio/audio.controller';
+import { AudioModule } from './audio/audio.module';
 
 @Module({
   imports: [
@@ -24,6 +26,7 @@ import { Call } from './calls/call.entity';
     RoomsModule,
     UsersModule,
     CallsModule,
+    AudioModule, // Add AudioModule here
   ],
   providers: [SignalingGateway],
 })

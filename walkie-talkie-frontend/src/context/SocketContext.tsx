@@ -42,7 +42,7 @@ export const SocketProvider: React.FC<SocketProviderProps> = ({ children }) => {
     });
 
     newSocket.on('error', (error) => {
-      console.error(`Socket error: ${error}`);
+      console.error('Socket error:', error.message || JSON.stringify(error));
     });
 
     return () => {

@@ -106,13 +106,20 @@ export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnec
     try {
       const call = await this.callsService.createCall(roomEntity, client.id, receiverSocketId);
       this.logger.log(`Call started with ID: ${call.id}`);
+  
+      // Emit `call-started` to the initiator
       client.emit('call-started', { callId: call.id });
+  
+      // Notify the receiver that a call has started
+      this.server.to(receiverSocketId).emit('incoming-call', { callId: call.id, from: client.id });
     } catch (error) {
       this.logger.error(`Failed to start call: ${error.message}`);
       client.emit('error', { message: 'Failed to start call. Please try again.' });
     }
   }
   
+  
+
   @SubscribeMessage('end-call')
   async handleEndCall(
     @MessageBody() data: { callId: string; room: string },
@@ -121,5 +128,12 @@ export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnec
     await this.callsService.endCall(data.callId);
     this.server.to(data.room).emit('speaking-status', { socketId: client.id, isSpeaking: false });
     this.logger.log(`Call ended with ID: ${data.callId}`);
+
+    // Notify both parties that the call has ended
+    const call = await this.callsService.findCallById(data.callId);
+    if (call) {
+      this.server.to(call.callerSocketId).emit('call-ended', { callId: data.callId });
+      this.server.to(call.receiverSocketId).emit('call-ended', { callId: data.callId });
+    }
   }
 }
