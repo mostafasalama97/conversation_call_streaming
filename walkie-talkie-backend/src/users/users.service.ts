@@ -17,7 +17,9 @@ export class UsersService {
   async addUser(socketId: string, room: Room): Promise<User> {
     this.logger.log(`Adding user with socket ID: ${socketId} to room ID: ${room.id}`);
     const user = this.usersRepository.create({ socketId, room });
+    console.log("user created in corectlly in db>>>>>>", user);
     const savedUser = await this.usersRepository.save(user);
+    console.log("user saved in corectlly in db>>>>>>", savedUser);
     this.logger.log(`User added: ${savedUser.socketId} to room: ${room.name}`);
     return savedUser;
   }

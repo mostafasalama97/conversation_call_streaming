@@ -1,4 +1,3 @@
-// src/calls/calls.service.ts
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
@@ -9,9 +8,12 @@ import { Room } from '../rooms/room.entity';
 export class CallsService {
   private readonly logger = new Logger(CallsService.name);
 
+  // Initialize the Map directly as a private property
+  private activeCallsByRoom: Map<string, string> = new Map();
+
   constructor(
     @InjectRepository(Call)
-    private callsRepository: Repository<Call>,
+    private callsRepository: Repository<Call>
   ) {}
 
   async createCall(
@@ -19,35 +21,48 @@ export class CallsService {
     callerSocketId: string,
     receiverSocketId: string,
   ): Promise<Call> {
-    this.logger.log(
-      `Creating call between ${callerSocketId} and ${receiverSocketId} in room: ${room.name}`,
-    );
+    // Check if there's already an active call in this room
+    const activeCallId = this.activeCallsByRoom.get(room.name);
+    if (activeCallId) {
+      throw new Error('There is already an active call in this room');
+    }
+
     const call = this.callsRepository.create({
       room,
       callerSocketId,
       receiverSocketId,
       startedAt: new Date(),
-      endedAt: null, 
+      endedAt: null,
       audioData: null,
       duration: 0,
       transcript: null,
     });
-    return this.callsRepository.save(call);
+
+    const savedCall = await this.callsRepository.save(call);
+    this.activeCallsByRoom.set(room.name, savedCall.id);
+    return savedCall;
   }
-  
 
   async endCall(callId: string): Promise<void> {
-    this.logger.log(`Ending call with ID: ${callId}`);
-    const call = await this.callsRepository.findOne({ where: { id: callId } });
+    const call = await this.callsRepository.findOne({
+      where: { id: callId },
+      relations: ['room'],
+    });
+
     if (!call) {
-      this.logger.error(`Call not found with ID: ${callId}`);
       throw new Error('Call not found');
     }
 
     call.endedAt = new Date();
-    call.duration =
-      (call.endedAt.getTime() - call.startedAt.getTime()) / 1000; // Duration in seconds
+    call.duration = (call.endedAt.getTime() - call.startedAt.getTime()) / 1000;
     await this.callsRepository.save(call);
+
+    // Remove from active calls
+    this.activeCallsByRoom.delete(call.room.name);
+  }
+
+  isCallActiveInRoom(roomName: string): boolean {
+    return this.activeCallsByRoom.has(roomName);
   }
 
   async findCallById(callId: string): Promise<Call | undefined> {
@@ -57,8 +72,21 @@ export class CallsService {
 
   async saveAudioData(callId: string, audioBuffer: Buffer): Promise<void> {
     this.logger.log(`Saving audio data for call ID: ${callId}, Buffer size: ${audioBuffer.length}`);
-    const result = await this.callsRepository.update(callId, { audioData: audioBuffer });
-    this.logger.log(`Update result:`, result);
+
+    // Get existing call
+    const call = await this.callsRepository.findOne({ where: { id: callId } });
+    if (!call) {
+      throw new Error('Call not found');
+    }
+
+    // If there's existing audio data, concatenate the new data
+    if (call.audioData) {
+      const combinedBuffer = Buffer.concat([call.audioData, audioBuffer]);
+      call.audioData = combinedBuffer;
+    } else {
+      call.audioData = audioBuffer;
+    }
+
+    await this.callsRepository.save(call);
   }
-  
 }

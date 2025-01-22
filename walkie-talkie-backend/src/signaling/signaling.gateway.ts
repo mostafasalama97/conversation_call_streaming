@@ -38,8 +38,8 @@ export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnec
 
   async handleDisconnect(socket: Socket) {
     this.logger.log(`Client disconnected: ${socket.id}`);
-    await this.usersService.removeUserBySocketId(socket.id);
-    this.logger.log(`User with socket ID ${socket.id} removed from all rooms.`);
+    // await this.usersService.removeUserBySocketId(socket.id);
+    // this.logger.log(`User with socket ID ${socket.id} removed from all rooms.`);
   }
 
   @SubscribeMessage('join-room')
@@ -55,6 +55,7 @@ export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnec
       this.logger.log(`Room created: ${room}`);
     }
     await this.usersService.addUser(socket.id, roomEntity);
+    console.log("user added in corectlly in db in signaling file>>>>>>", roomEntity);
     socket.join(room);
 
     this.server.to(room).emit('user-joined', { socketId: socket.id });
@@ -78,7 +79,7 @@ export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnec
   ) {
     this.logger.log(`Received 'leave-room' from ${socket.id} for room: ${data.room}`);
     const { room } = data;
-    await this.usersService.removeUserFromRoom(socket.id, room);
+    // await this.usersService.removeUserFromRoom(socket.id, room);
     socket.leave(room);
     this.server.to(room).emit('user-left', { socketId: socket.id });
   }
@@ -135,5 +136,26 @@ export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnec
       this.server.to(call.callerSocketId).emit('call-ended', { callId: data.callId });
       this.server.to(call.receiverSocketId).emit('call-ended', { callId: data.callId });
     }
+  }
+
+
+  @SubscribeMessage('start-speaking')
+  handleStartSpeaking(
+    @MessageBody() data: { room: string },
+    @ConnectedSocket() socket: Socket,
+  ) {
+    const { room } = data;
+    this.logger.log(`User ${socket.id} started speaking in room: ${room}`);
+    this.server.to(room).emit('speaking-status', { socketId: socket.id, isSpeaking: true });
+  }
+  
+  @SubscribeMessage('stop-speaking')
+  handleStopSpeaking(
+    @MessageBody() data: { room: string },
+    @ConnectedSocket() socket: Socket,
+  ) {
+    const { room } = data;
+    this.logger.log(`User ${socket.id} stopped speaking in room: ${room}`);
+    this.server.to(room).emit('speaking-status', { socketId: socket.id, isSpeaking: false });
   }
 }
